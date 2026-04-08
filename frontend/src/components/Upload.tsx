@@ -1,65 +1,62 @@
-import { useCallback, useRef, useState } from "react";
-import { Upload as UploadIcon, FileVideo, Loader2 } from "lucide-react";
+import { useCallback, useRef } from "react";
+import { Upload as UploadIcon, Loader2 } from "lucide-react";
 
 type Props = {
-  onUpload: (file: File) => void;
+  onUpload: (files: File[]) => void;
   loading: boolean;
   progress: string;
 };
 
 export function Upload({ onUpload, loading, progress }: Props) {
-  const [dragOver, setDragOver] = useState(false);
-  const [fileName, setFileName] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const handleFile = useCallback(
-    (file: File) => {
-      if (!file.type.startsWith("video/")) {
-        alert("Envie um arquivo de vídeo (.mp4, .mov, .webm)");
-        return;
+  const handleFiles = useCallback(
+    (fileList: FileList) => {
+      const valid: File[] = [];
+      for (let i = 0; i < fileList.length; i++) {
+        const f = fileList[i];
+        if (!f.type.startsWith("video/")) continue;
+        if (f.size > 100 * 1024 * 1024) {
+          alert(`${f.name} muito grande (máximo 100MB). Ignorado.`);
+          continue;
+        }
+        valid.push(f);
       }
-      if (file.size > 100 * 1024 * 1024) {
-        alert("Arquivo muito grande (máximo 100MB)");
-        return;
-      }
-      setFileName(file.name);
-      onUpload(file);
+      if (valid.length > 0) onUpload(valid);
     },
     [onUpload]
   );
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-[60vh]">
+    <div className="flex flex-col items-center justify-center min-h-[40vh]">
       <div className="text-center mb-8">
         <h2 className="text-3xl font-bold text-care-light mb-2">
           Analise seus vídeos
         </h2>
         <p className="text-care-muted max-w-md">
-          Envie um Reel ou Short e descubra o que funciona — roteiro, cortes,
-          composição visual e textos na tela.
+          Envie um ou vários Reels/Shorts e descubra o que funciona — roteiro,
+          cortes, composição visual e textos na tela.
         </p>
       </div>
 
       <div
         onDragOver={(e) => {
           e.preventDefault();
-          setDragOver(true);
+          e.currentTarget.classList.add("border-care-accent", "bg-care-accent/10");
         }}
-        onDragLeave={() => setDragOver(false)}
+        onDragLeave={(e) => {
+          e.currentTarget.classList.remove("border-care-accent", "bg-care-accent/10");
+        }}
         onDrop={(e) => {
           e.preventDefault();
-          setDragOver(false);
-          const file = e.dataTransfer.files[0];
-          if (file) handleFile(file);
+          e.currentTarget.classList.remove("border-care-accent", "bg-care-accent/10");
+          if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
         }}
         onClick={() => !loading && inputRef.current?.click()}
         className={`
           w-full max-w-lg border-2 border-dashed rounded-2xl p-12
           flex flex-col items-center gap-4 cursor-pointer transition-all
-          ${dragOver
-            ? "border-care-accent bg-care-accent/10"
-            : "border-care-border hover:border-care-accent/50 hover:bg-care-surface"
-          }
+          border-care-border hover:border-care-accent/50 hover:bg-care-surface
           ${loading ? "pointer-events-none opacity-60" : ""}
         `}
       >
@@ -67,10 +64,11 @@ export function Upload({ onUpload, loading, progress }: Props) {
           ref={inputRef}
           type="file"
           accept="video/*"
+          multiple
           className="hidden"
           onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (file) handleFile(file);
+            if (e.target.files?.length) handleFiles(e.target.files);
+            e.target.value = "";
           }}
         />
 
@@ -78,25 +76,18 @@ export function Upload({ onUpload, loading, progress }: Props) {
           <>
             <Loader2 className="w-12 h-12 text-care-accent animate-spin" />
             <p className="text-care-muted text-sm">{progress}</p>
-            {fileName && (
-              <p className="text-care-muted text-xs">{fileName}</p>
-            )}
           </>
         ) : (
           <>
             <div className="w-16 h-16 rounded-full bg-care-surface flex items-center justify-center">
-              {fileName ? (
-                <FileVideo className="w-8 h-8 text-care-accent" />
-              ) : (
-                <UploadIcon className="w-8 h-8 text-care-muted" />
-              )}
+              <UploadIcon className="w-8 h-8 text-care-muted" />
             </div>
             <div className="text-center">
               <p className="text-care-light font-medium">
-                {fileName || "Arraste um vídeo ou clique para selecionar"}
+                Arraste vídeos ou clique para selecionar
               </p>
               <p className="text-care-muted text-sm mt-1">
-                MP4, MOV, WebM — até 100MB
+                MP4, MOV, WebM — até 100MB cada — selecione vários de uma vez
               </p>
             </div>
           </>
