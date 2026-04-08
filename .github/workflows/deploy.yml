@@ -1,0 +1,56 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install & build
+        working-directory: frontend
+        env:
+          VITE_API_URL: https://care-video-analyzer-api.azurewebsites.net
+        run: |
+          npm ci
+          npm run build
+
+      - name: Deploy to SWA
+        working-directory: frontend
+        run: |
+          npx @azure/static-web-apps-cli deploy ./dist \
+            --deployment-token ${{ secrets.SWA_DEPLOYMENT_TOKEN }} \
+            --env production
+
+  deploy-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Build & push Docker image
+        working-directory: backend
+        run: |
+          az acr build \
+            --registry careunifiedacr \
+            --resource-group fa-care-api-prod \
+            --image care-video-analyzer-api:v${{ github.run_number }} \
+            .
+
+      - name: Update App Service
+        run: |
+          az webapp config container set \
+            --name care-video-analyzer-api \
+            --resource-group rg-care-aderencia-prod \
+            --container-image-name careunifiedacr.azurecr.io/care-video-analyzer-api:v${{ github.run_number }} \
+            --container-registry-url https://careunifiedacr.azurecr.io

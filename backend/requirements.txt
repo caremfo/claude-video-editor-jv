@@ -1,0 +1,6 @@
+fastapi==0.115.0
+uvicorn==0.30.6
+python-multipart==0.0.9
+openai>=1.0.0
+scenedetect[opencv]>=0.6.4
+aiofiles==24.1.0
