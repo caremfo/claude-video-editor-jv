@@ -144,9 +144,11 @@ def health():
 @app.post("/api/analyze")
 async def analyze_video(
     video: UploadFile = File(...),
-    openai_key: str = Form(...),
+    openai_key: str = Form(""),
     fps: int = Form(3),
 ):
+    # Usa env var como fallback
+    openai_key = openai_key or os.environ.get("OPENAI_API_KEY", "")
     if video.size and video.size > MAX_FILE_SIZE:
         raise HTTPException(413, "Arquivo muito grande (max 100MB)")
 

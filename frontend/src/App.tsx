@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { Upload } from "./components/Upload";
 import { Analysis } from "./components/Analysis";
-import { ApiKeyModal } from "./components/ApiKeyModal";
 import { Toaster, toast } from "sonner";
 import { Film } from "lucide-react";
 import "./index.css";
@@ -35,27 +34,17 @@ export type AnalysisResult = {
 const API_BASE = import.meta.env.VITE_API_URL || "";
 
 function App() {
-  const [apiKey, setApiKey] = useState(
-    () => localStorage.getItem("openai_key") || ""
-  );
-  const [showKeyModal, setShowKeyModal] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState("");
 
   const handleUpload = async (file: File) => {
-    if (!apiKey) {
-      setShowKeyModal(true);
-      return;
-    }
-
     setLoading(true);
     setProgress("Enviando vídeo...");
     setResult(null);
 
     const formData = new FormData();
     formData.append("video", file);
-    formData.append("openai_key", apiKey);
     formData.append("fps", "3");
 
     try {
@@ -81,32 +70,17 @@ function App() {
     }
   };
 
-  const handleSaveKey = (key: string) => {
-    setApiKey(key);
-    localStorage.setItem("openai_key", key);
-    setShowKeyModal(false);
-    toast.success("Chave salva!");
-  };
-
   return (
     <div className="min-h-screen bg-care-dark">
       <Toaster theme="dark" position="top-right" />
 
       {/* Header */}
       <header className="border-b border-care-border px-6 py-4">
-        <div className="max-w-6xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Film className="w-7 h-7 text-care-accent" />
-            <h1 className="text-xl font-semibold text-care-light">
-              Care Video Analyzer
-            </h1>
-          </div>
-          <button
-            onClick={() => setShowKeyModal(true)}
-            className="text-sm text-care-muted hover:text-care-light transition px-3 py-1.5 rounded border border-care-border hover:border-care-accent"
-          >
-            {apiKey ? "Chave configurada" : "Configurar API Key"}
-          </button>
+        <div className="max-w-6xl mx-auto flex items-center gap-3">
+          <Film className="w-7 h-7 text-care-accent" />
+          <h1 className="text-xl font-semibold text-care-light">
+            Care Video Analyzer
+          </h1>
         </div>
       </header>
 
@@ -132,15 +106,6 @@ function App() {
           </div>
         )}
       </main>
-
-      {/* API Key Modal */}
-      {showKeyModal && (
-        <ApiKeyModal
-          currentKey={apiKey}
-          onSave={handleSaveKey}
-          onClose={() => setShowKeyModal(false)}
-        />
-      )}
     </div>
   );
 }
