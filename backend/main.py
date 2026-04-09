@@ -634,7 +634,7 @@ async def describe_frames_with_claude(
     client = AsyncAnthropic(api_key=api_key)
     message = await client.messages.create(
         model="claude-sonnet-4-5",
-        max_tokens=4096,
+        max_tokens=16384,
         messages=[{"role": "user", "content": content_blocks}],
     )
 
@@ -648,16 +648,63 @@ async def describe_frames_with_claude(
             lines = lines[1:]
         text = "\n".join(lines).strip()
 
+    # Try full parse first
     try:
         return json.loads(text)
-    except json.JSONDecodeError as e:
-        return [
-            {
-                "error": "Falha ao parsear JSON da resposta",
-                "detail": str(e),
-                "raw_response": text[:2000],
-            }
-        ]
+    except json.JSONDecodeError:
+        pass
+
+    # Fallback: attempt to recover complete objects from a truncated JSON array
+    recovered = _recover_partial_json_array(text)
+    if recovered is not None:
+        return recovered
+
+    return [
+        {
+            "error": "Falha ao parsear JSON da resposta",
+            "raw_response": text[:3000],
+        }
+    ]
+
+
+def _recover_partial_json_array(text: str) -> list[dict] | None:
+    """
+    Se a resposta foi cortada no meio de um objeto, tenta recuperar os
+    objetos completos já recebidos fechando o array no último `}` válido
+    no topo do array.
+    """
+    depth = 0
+    in_string = False
+    escape = False
+    last_complete = -1
+
+    for i, ch in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 1:  # fechou um objeto dentro do array
+                last_complete = i
+
+    if last_complete <= 0:
+        return None
+
+    candidate = text[: last_complete + 1] + "]"
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
 
 
 @app.post("/api/library/{item_id}/describe-visuals")
