@@ -4,14 +4,58 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from bson import ObjectId
+from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from motor.motor_asyncio import AsyncIOMotorClient
 
 app = FastAPI(title="Care Video Analyzer API")
+
+# ─── MongoDB ──────────────────────────────────────────────────────────
+
+MONGODB_URI = os.environ.get("MONGODB_URI", "")
+DB_NAME = os.environ.get("DB_NAME", "care_video_analyzer")
+
+mongo_client: Optional[AsyncIOMotorClient] = None
+db = None
+
+
+@app.on_event("startup")
+async def startup_db():
+    global mongo_client, db
+    if MONGODB_URI:
+        mongo_client = AsyncIOMotorClient(MONGODB_URI)
+        db = mongo_client[DB_NAME]
+        # Create indexes
+        try:
+            await db.videos.create_index("uploaded_at")
+            await db.videos.create_index("category")
+            await db.videos.create_index("tags")
+            await db.videos.create_index("creator")
+        except Exception:
+            pass
+
+
+@app.on_event("shutdown")
+async def shutdown_db():
+    if mongo_client:
+        mongo_client.close()
+
+
+def _serialize_doc(doc: dict) -> dict:
+    """Convert BSON ObjectId to string for JSON response."""
+    if doc and "_id" in doc:
+        doc["_id"] = str(doc["_id"])
+    if doc and "uploaded_at" in doc and isinstance(doc["uploaded_at"], datetime):
+        doc["uploaded_at"] = doc["uploaded_at"].isoformat()
+    return doc
+
 
 ALLOWED_ORIGINS = os.environ.get(
     "ALLOWED_ORIGINS", "http://localhost:5173"
@@ -340,9 +384,31 @@ async def analyze_video(
             },
         }
 
-        # Save result
+        # Save result to filesystem (for frame serving)
         with open(job_dir / "result.json", "w") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
+
+        # Persist to MongoDB
+        if db is not None:
+            doc = {
+                **result,
+                "filename": video.filename,
+                "uploaded_at": datetime.utcnow(),
+                "category": "reference",
+                "tags": [],
+                "creator": None,
+                "topic": None,
+                "notes": None,
+            }
+            try:
+                insert_res = await db.videos.insert_one(doc)
+                result["_id"] = str(insert_res.inserted_id)
+                result["persisted"] = True
+            except Exception as e:
+                result["persisted"] = False
+                result["persist_error"] = str(e)
+        else:
+            result["persisted"] = False
 
         return result
 
@@ -374,3 +440,105 @@ async def cleanup(job_id: str):
     if job_dir.exists():
         shutil.rmtree(job_dir)
     return {"status": "cleaned"}
+
+
+# ─── Library endpoints (MongoDB-backed) ───────────────────────────────
+
+@app.get("/api/library")
+async def list_library(category: str | None = None, creator: str | None = None):
+    """Lista todas as análises persistidas, mais recentes primeiro."""
+    if db is None:
+        raise HTTPException(503, "MongoDB não configurado")
+
+    query: dict = {}
+    if category:
+        query["category"] = category
+    if creator:
+        query["creator"] = creator
+
+    projection = {
+        "filename": 1,
+        "uploaded_at": 1,
+        "category": 1,
+        "tags": 1,
+        "creator": 1,
+        "topic": 1,
+        "notes": 1,
+        "job_id": 1,
+        "metadata.duration_seconds": 1,
+        "metadata.width": 1,
+        "metadata.height": 1,
+        "stats": 1,
+    }
+
+    cursor = db.videos.find(query, projection).sort("uploaded_at", -1).limit(500)
+    items = []
+    async for doc in cursor:
+        items.append(_serialize_doc(doc))
+    return {"items": items, "count": len(items)}
+
+
+@app.get("/api/library/{item_id}")
+async def get_library_item(item_id: str):
+    """Retorna a análise completa de um item da biblioteca."""
+    if db is None:
+        raise HTTPException(503, "MongoDB não configurado")
+
+    try:
+        oid = ObjectId(item_id)
+    except Exception:
+        raise HTTPException(400, "ID inválido")
+
+    doc = await db.videos.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(404, "Não encontrado")
+
+    return _serialize_doc(doc)
+
+
+@app.patch("/api/library/{item_id}")
+async def update_library_item(item_id: str, updates: dict = Body(...)):
+    """Atualiza metadados editáveis (tags, creator, topic, notes, category)."""
+    if db is None:
+        raise HTTPException(503, "MongoDB não configurado")
+
+    try:
+        oid = ObjectId(item_id)
+    except Exception:
+        raise HTTPException(400, "ID inválido")
+
+    allowed = {"tags", "creator", "topic", "notes", "category"}
+    filtered = {k: v for k, v in updates.items() if k in allowed}
+
+    if not filtered:
+        raise HTTPException(400, "Nenhum campo válido para atualizar")
+
+    result = await db.videos.update_one({"_id": oid}, {"$set": filtered})
+    if result.matched_count == 0:
+        raise HTTPException(404, "Não encontrado")
+
+    return {"updated": True, "fields": list(filtered.keys())}
+
+
+@app.delete("/api/library/{item_id}")
+async def delete_library_item(item_id: str):
+    """Remove item da biblioteca e limpa arquivos associados."""
+    if db is None:
+        raise HTTPException(503, "MongoDB não configurado")
+
+    try:
+        oid = ObjectId(item_id)
+    except Exception:
+        raise HTTPException(400, "ID inválido")
+
+    doc = await db.videos.find_one({"_id": oid}, {"job_id": 1})
+    if not doc:
+        raise HTTPException(404, "Não encontrado")
+
+    # Limpa filesystem se ainda existir
+    if doc.get("job_id"):
+        job_dir = UPLOAD_DIR / doc["job_id"]
+        shutil.rmtree(job_dir, ignore_errors=True)
+
+    await db.videos.delete_one({"_id": oid})
+    return {"deleted": True}

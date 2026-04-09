@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { Upload } from "./components/Upload";
 import { Analysis } from "./components/Analysis";
+import { Library } from "./components/Library";
 import { Toaster, toast } from "sonner";
-import { Film } from "lucide-react";
+import { Film, Library as LibraryIcon, Upload as UploadIcon } from "lucide-react";
 import "./index.css";
 
 export type AnalysisResult = {
@@ -51,7 +52,10 @@ type QueueItem = {
 
 const API_BASE = import.meta.env.VITE_API_URL || "";
 
+type View = "upload" | "library";
+
 function App() {
+  const [view, setView] = useState<View>("upload");
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [processing, setProcessing] = useState(false);
   const [currentIndex, setCurrentIndex] = useState(-1);
@@ -170,25 +174,51 @@ function App() {
               Care Video Analyzer
             </h1>
           </div>
-          {queue.length > 0 && !processing && (
+          <nav className="flex items-center gap-2">
             <button
-              onClick={handleReset}
-              className="text-sm text-care-muted hover:text-care-light transition px-3 py-1.5 rounded border border-care-border hover:border-care-accent"
+              onClick={() => setView("upload")}
+              className={`flex items-center gap-2 text-sm px-3 py-1.5 rounded border transition ${
+                view === "upload"
+                  ? "border-care-accent text-care-accent"
+                  : "border-care-border text-care-muted hover:text-care-light"
+              }`}
             >
-              Limpar tudo
+              <UploadIcon className="w-4 h-4" />
+              Upload
             </button>
-          )}
+            <button
+              onClick={() => setView("library")}
+              className={`flex items-center gap-2 text-sm px-3 py-1.5 rounded border transition ${
+                view === "library"
+                  ? "border-care-accent text-care-accent"
+                  : "border-care-border text-care-muted hover:text-care-light"
+              }`}
+            >
+              <LibraryIcon className="w-4 h-4" />
+              Biblioteca
+            </button>
+            {view === "upload" && queue.length > 0 && !processing && (
+              <button
+                onClick={handleReset}
+                className="text-sm text-care-muted hover:text-care-light transition px-3 py-1.5 rounded border border-care-border hover:border-care-accent"
+              >
+                Limpar
+              </button>
+            )}
+          </nav>
         </div>
       </header>
 
       <main className="max-w-6xl mx-auto p-6">
+        {view === "library" && <Library apiBase={API_BASE} />}
+
         {/* Upload area - sempre visível quando não processando */}
-        {!processing && (
+        {view === "upload" && !processing && (
           <Upload onUpload={handleUpload} loading={false} progress="" />
         )}
 
         {/* Processing indicator */}
-        {processing && (
+        {view === "upload" && processing && (
           <div className="text-center py-8">
             <div className="inline-flex items-center gap-3 bg-care-surface border border-care-border rounded-xl px-6 py-4">
               <div className="w-5 h-5 border-2 border-care-accent border-t-transparent rounded-full animate-spin" />
@@ -203,7 +233,7 @@ function App() {
         )}
 
         {/* Queue list */}
-        {queue.length > 0 && (
+        {view === "upload" && queue.length > 0 && (
           <div className="mt-8">
             <h3 className="text-lg font-semibold text-care-light mb-4">
               Vídeos ({doneCount}/{queue.length} concluídos
