@@ -8,6 +8,8 @@ import {
   Monitor,
   ChevronLeft,
   ChevronRight,
+  Music,
+  Volume2,
 } from "lucide-react";
 
 type Props = {
@@ -16,7 +18,7 @@ type Props = {
 };
 
 export function Analysis({ result, apiBase }: Props) {
-  const { metadata, transcription, scenes, frames, stats } = result;
+  const { metadata, transcription, scenes, frames, stats, audio_events } = result;
   const [currentFrame, setCurrentFrame] = useState(0);
 
   const frameSrc = (name: string) =>
@@ -201,6 +203,81 @@ export function Analysis({ result, apiBase }: Props) {
         <div className="bg-red-500/10 border border-red-500/30 rounded-2xl p-4">
           <p className="text-red-400 text-sm">
             Erro na transcrição: {transcription.error}
+          </p>
+        </div>
+      )}
+
+      {/* Audio Events */}
+      {audio_events && !audio_events.error && (
+        <div className="bg-care-surface border border-care-border rounded-2xl p-6">
+          <h3 className="text-lg font-semibold text-care-light mb-4 flex items-center gap-2">
+            <Music className="w-5 h-5 text-care-accent" />
+            Áudio (música e efeitos sonoros)
+          </h3>
+
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-6">
+            <div className="bg-care-dark rounded-lg px-4 py-3">
+              <p className="text-care-muted text-xs mb-1">Música</p>
+              <p className="text-care-light font-semibold">
+                {audio_events.has_music ? "Sim" : "Não"}
+                <span className="text-care-muted text-xs ml-2">
+                  ({(audio_events.music_confidence * 100).toFixed(0)}%)
+                </span>
+              </p>
+            </div>
+            <div className="bg-care-dark rounded-lg px-4 py-3">
+              <p className="text-care-muted text-xs mb-1">Fala</p>
+              <p className="text-care-light font-semibold">
+                {(audio_events.speech_confidence * 100).toFixed(0)}%
+              </p>
+            </div>
+            <div className="bg-care-dark rounded-lg px-4 py-3">
+              <p className="text-care-muted text-xs mb-1">Efeitos sonoros</p>
+              <p className="text-care-light font-semibold">
+                {audio_events.sound_effects.length}
+              </p>
+            </div>
+          </div>
+
+          {audio_events.sound_effects.length > 0 && (
+            <div className="mb-6">
+              <h4 className="text-care-muted text-sm font-medium mb-3 flex items-center gap-2">
+                <Volume2 className="w-4 h-4" />
+                Timeline de SFX detectados
+              </h4>
+              <div className="space-y-1 max-h-64 overflow-y-auto pr-2">
+                {audio_events.sound_effects.map((sfx, i) => (
+                  <div
+                    key={i}
+                    className="flex items-center gap-3 bg-care-dark rounded-lg px-3 py-2"
+                  >
+                    <span className="text-care-accent font-mono text-sm min-w-[50px]">
+                      {sfx.time}s
+                    </span>
+                    <span className="text-care-light text-sm flex-1">
+                      {sfx.label}
+                    </span>
+                    <span className="text-care-muted text-xs">
+                      {(sfx.score * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {audio_events.sound_effects.length === 0 && (
+            <p className="text-care-muted text-sm">
+              Nenhum efeito sonoro destacado detectado (só fala/música).
+            </p>
+          )}
+        </div>
+      )}
+
+      {audio_events?.error && (
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4">
+          <p className="text-amber-400 text-sm">
+            Análise de áudio: {audio_events.error}
           </p>
         </div>
       )}

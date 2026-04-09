@@ -25,10 +25,20 @@ export type AnalysisResult = {
   } | null;
   scenes: { scene: number; start: number; end: number; duration: number }[];
   frames: string[];
+  audio_events: {
+    has_music: boolean;
+    music_confidence: number;
+    speech_confidence: number;
+    timeline: { start: number; events: { label: string; score: number }[] }[];
+    sound_effects: { time: number; label: string; score: number }[];
+    error?: string;
+  } | null;
   stats: {
     total_frames: number;
     total_scenes: number;
     cuts_per_minute: number;
+    sound_effects_count: number;
+    has_music: boolean;
   };
 };
 
