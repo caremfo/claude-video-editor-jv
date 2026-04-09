@@ -1,11 +1,21 @@
 import { useEffect, useState } from "react";
 import type { AnalysisResult } from "../App";
 import { Analysis } from "./Analysis";
-import { Trash2, Loader2, Library as LibraryIcon, Tag, Save, X } from "lucide-react";
+import {
+  Trash2,
+  Loader2,
+  Library as LibraryIcon,
+  Tag,
+  Save,
+  X,
+  BookOpen,
+  Sparkles,
+} from "lucide-react";
 import { toast } from "sonner";
 
 type Props = {
   apiBase: string;
+  onBibleCreated?: () => void;
 };
 
 type LibraryItem = {
@@ -32,13 +42,57 @@ type LibraryItem = {
   };
 };
 
-export function Library({ apiBase }: Props) {
+export function Library({ apiBase, onBibleCreated }: Props) {
   const [items, setItems] = useState<LibraryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<AnalysisResult | null>(null);
   const [selectedItem, setSelectedItem] = useState<LibraryItem | null>(null);
   const [editing, setEditing] = useState(false);
   const [editForm, setEditForm] = useState({ creator: "", topic: "", tags: "", notes: "" });
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [showBibleModal, setShowBibleModal] = useState(false);
+  const [bibleName, setBibleName] = useState("");
+  const [generatingBible, setGeneratingBible] = useState(false);
+
+  const toggleSelect = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const generateBible = async () => {
+    const videoIds = Array.from(selectedIds);
+    if (videoIds.length < 2) return;
+    if (!bibleName.trim()) {
+      toast.error("Dê um nome ao bible");
+      return;
+    }
+    setGeneratingBible(true);
+    try {
+      const res = await fetch(`${apiBase}/api/style-bibles`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: bibleName.trim(), video_ids: videoIds }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: "Erro" }));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      toast.success("Style Bible gerado!");
+      setShowBibleModal(false);
+      setBibleName("");
+      setSelectedIds(new Set());
+      onBibleCreated?.();
+    } catch (err: any) {
+      toast.error(`Erro: ${err.message}`);
+    } finally {
+      setGeneratingBible(false);
+    }
+  };
 
   const loadLibrary = async () => {
     setLoading(true);
@@ -261,13 +315,38 @@ export function Library({ apiBase }: Props) {
           <LibraryIcon className="w-7 h-7 text-care-accent" />
           Biblioteca ({items.length})
         </h2>
-        <button
-          onClick={loadLibrary}
-          className="text-sm text-care-muted hover:text-care-light"
-        >
-          Recarregar
-        </button>
+        <div className="flex items-center gap-3">
+          {selectedIds.size >= 2 && (
+            <button
+              onClick={() => setShowBibleModal(true)}
+              className="flex items-center gap-2 text-sm bg-care-accent hover:bg-care-accent-hover text-white px-4 py-2 rounded-lg transition"
+            >
+              <BookOpen className="w-4 h-4" />
+              Gerar Style Bible ({selectedIds.size})
+            </button>
+          )}
+          {selectedIds.size > 0 && (
+            <button
+              onClick={() => setSelectedIds(new Set())}
+              className="text-sm text-care-muted hover:text-care-light"
+            >
+              Limpar seleção
+            </button>
+          )}
+          <button
+            onClick={loadLibrary}
+            className="text-sm text-care-muted hover:text-care-light"
+          >
+            Recarregar
+          </button>
+        </div>
       </div>
+
+      {selectedIds.size > 0 && selectedIds.size < 2 && (
+        <div className="bg-care-accent/10 border border-care-accent/30 rounded-lg px-4 py-2 mb-4 text-sm text-care-light">
+          Selecione pelo menos mais 1 vídeo para gerar um Style Bible
+        </div>
+      )}
 
       {loading ? (
         <div className="flex items-center justify-center py-12">
@@ -284,9 +363,42 @@ export function Library({ apiBase }: Props) {
             <div
               key={item._id}
               onClick={() => openItem(item)}
-              className="bg-care-surface border border-care-border rounded-xl p-4 cursor-pointer hover:border-care-accent transition"
+              className={`bg-care-surface border rounded-xl p-4 cursor-pointer transition ${
+                selectedIds.has(item._id)
+                  ? "border-care-accent bg-care-accent/5"
+                  : "border-care-border hover:border-care-accent"
+              }`}
             >
-              <div className="flex items-start justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div
+                  onClick={(e) => toggleSelect(item._id, e)}
+                  className="mt-1 flex-shrink-0 cursor-pointer"
+                >
+                  <div
+                    className={`w-5 h-5 rounded border-2 flex items-center justify-center transition ${
+                      selectedIds.has(item._id)
+                        ? "bg-care-accent border-care-accent"
+                        : "border-care-border hover:border-care-accent"
+                    }`}
+                  >
+                    {selectedIds.has(item._id) && (
+                      <svg
+                        className="w-3 h-3 text-white"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                        strokeWidth="3"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M5 13l4 4L19 7"
+                        />
+                      </svg>
+                    )}
+                  </div>
+                </div>
+              <div className="flex items-start justify-between gap-4 flex-1 min-w-0">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 mb-1">
                     <h3 className="text-care-light font-medium truncate">
@@ -334,8 +446,82 @@ export function Library({ apiBase }: Props) {
                   <Trash2 className="w-4 h-4" />
                 </button>
               </div>
+              </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Generate Bible Modal */}
+      {showBibleModal && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-care-surface border border-care-border rounded-2xl p-6 w-full max-w-md">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-care-light flex items-center gap-2">
+                <Sparkles className="w-5 h-5 text-care-accent" />
+                Gerar Style Bible
+              </h3>
+              <button
+                onClick={() => setShowBibleModal(false)}
+                disabled={generatingBible}
+                className="text-care-muted hover:text-care-light disabled:opacity-40"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-care-muted text-sm mb-4">
+              O Claude vai analisar os {selectedIds.size} vídeos selecionados e
+              extrair padrões contextuais de edição, composição e ritmo.
+              Custa ~$0.20-0.40.
+            </p>
+
+            <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3 text-xs text-amber-200 mb-4">
+              ⚠️ Todos os vídeos selecionados precisam ter{" "}
+              <strong>descrições visuais</strong> geradas antes. Se algum não
+              tiver, o bible falha.
+            </div>
+
+            <label className="text-care-muted text-xs block mb-1">
+              Nome do bible
+            </label>
+            <input
+              type="text"
+              value={bibleName}
+              onChange={(e) => setBibleName(e.target.value)}
+              placeholder="ex: Diego Duarte - Reels de mercado"
+              disabled={generatingBible}
+              className="w-full bg-care-dark border border-care-border rounded-lg px-4 py-2.5 text-care-light text-sm mb-4 focus:outline-none focus:border-care-accent disabled:opacity-50"
+              autoFocus
+            />
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowBibleModal(false)}
+                disabled={generatingBible}
+                className="flex-1 px-4 py-2.5 rounded-lg border border-care-border text-care-muted hover:text-care-light text-sm transition disabled:opacity-40"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={generateBible}
+                disabled={generatingBible || !bibleName.trim()}
+                className="flex-1 px-4 py-2.5 rounded-lg bg-care-accent hover:bg-care-accent-hover text-white text-sm font-medium transition disabled:opacity-40 flex items-center justify-center gap-2"
+              >
+                {generatingBible ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Gerando...
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-4 h-4" />
+                    Gerar Bible
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

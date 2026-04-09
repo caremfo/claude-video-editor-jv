@@ -2,8 +2,14 @@ import { useState } from "react";
 import { Upload } from "./components/Upload";
 import { Analysis } from "./components/Analysis";
 import { Library } from "./components/Library";
+import { Bibles } from "./components/Bibles";
 import { Toaster, toast } from "sonner";
-import { Film, Library as LibraryIcon, Upload as UploadIcon } from "lucide-react";
+import {
+  Film,
+  Library as LibraryIcon,
+  Upload as UploadIcon,
+  BookOpen,
+} from "lucide-react";
 import "./index.css";
 
 export type AnalysisResult = {
@@ -67,7 +73,7 @@ type QueueItem = {
 
 const API_BASE = import.meta.env.VITE_API_URL || "";
 
-type View = "upload" | "library";
+type View = "upload" | "library" | "bibles";
 
 function App() {
   const [view, setView] = useState<View>("upload");
@@ -212,6 +218,17 @@ function App() {
               <LibraryIcon className="w-4 h-4" />
               Biblioteca
             </button>
+            <button
+              onClick={() => setView("bibles")}
+              className={`flex items-center gap-2 text-sm px-3 py-1.5 rounded border transition ${
+                view === "bibles"
+                  ? "border-care-accent text-care-accent"
+                  : "border-care-border text-care-muted hover:text-care-light"
+              }`}
+            >
+              <BookOpen className="w-4 h-4" />
+              Style Bibles
+            </button>
             {view === "upload" && queue.length > 0 && !processing && (
               <button
                 onClick={handleReset}
@@ -225,7 +242,14 @@ function App() {
       </header>
 
       <main className="max-w-6xl mx-auto p-6">
-        {view === "library" && <Library apiBase={API_BASE} />}
+        {view === "library" && (
+          <Library
+            apiBase={API_BASE}
+            onBibleCreated={() => setView("bibles")}
+          />
+        )}
+
+        {view === "bibles" && <Bibles apiBase={API_BASE} />}
 
         {/* Upload area - sempre visível quando não processando */}
         {view === "upload" && !processing && (

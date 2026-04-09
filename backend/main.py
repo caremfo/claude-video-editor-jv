@@ -761,6 +761,304 @@ async def describe_visuals(item_id: str):
     }
 
 
+# ─── Style Bible (cross-video pattern extraction) ────────────────────
+
+def _format_video_for_bible(doc: dict, idx: int) -> str:
+    """Serializa um vídeo em texto estruturado para o prompt do bible."""
+    parts = [f"\n=== VÍDEO {idx}: {doc.get('filename', 'sem nome')} ==="]
+
+    if doc.get("creator"):
+        parts.append(f"Creator: {doc['creator']}")
+    if doc.get("topic"):
+        parts.append(f"Tema: {doc['topic']}")
+    if doc.get("tags"):
+        parts.append(f"Tags: {', '.join(doc['tags'])}")
+    if doc.get("notes"):
+        parts.append(f"Notas: {doc['notes']}")
+
+    meta = doc.get("metadata", {})
+    parts.append(
+        f"Duração: {meta.get('duration_seconds', 0)}s | "
+        f"Resolução: {meta.get('width', 0)}x{meta.get('height', 0)}"
+    )
+
+    scenes = doc.get("scenes", [])
+    if scenes:
+        parts.append(f"\nCortes detectados ({len(scenes)} cenas):")
+        for s in scenes:
+            parts.append(
+                f"  Cena {s['scene']}: {s['start']}s → {s['end']}s (duração {s['duration']}s)"
+            )
+
+    transcription = doc.get("transcription")
+    if transcription and transcription.get("segments"):
+        parts.append("\nTranscrição (com timestamps):")
+        for seg in transcription["segments"]:
+            parts.append(f"  [{seg['start']:.1f}s-{seg['end']:.1f}s] {seg['text']}")
+
+    audio = doc.get("audio_events")
+    if audio and not audio.get("error"):
+        parts.append(
+            f"\nÁudio: música={'sim' if audio.get('has_music') else 'não'} "
+            f"(confiança {audio.get('music_confidence', 0)})"
+        )
+        sfx = audio.get("sound_effects", [])
+        if sfx:
+            parts.append("Efeitos sonoros detectados:")
+            for e in sfx:
+                parts.append(f"  {e['time']}s: {e['label']} ({e['score']})")
+
+    visuals = doc.get("visual_descriptions", [])
+    if visuals:
+        parts.append("\nAnálise visual cena a cena:")
+        for v in visuals:
+            if v.get("error"):
+                continue
+            header = f"  Cena {v.get('scene', '?')}"
+            tags_info = []
+            if v.get("shot_type"):
+                tags_info.append(v["shot_type"])
+            if v.get("subject_type"):
+                tags_info.append(v["subject_type"])
+            if v.get("purpose"):
+                tags_info.append(v["purpose"])
+            if tags_info:
+                header += f" ({', '.join(tags_info)})"
+            parts.append(header + ":")
+            if v.get("subject"):
+                parts.append(f"    • O que aparece: {v['subject']}")
+            if v.get("visual_elements"):
+                parts.append(
+                    f"    • Elementos na tela: {'; '.join(v['visual_elements'])}"
+                )
+            if v.get("composition"):
+                parts.append(f"    • Composição: {v['composition']}")
+            if v.get("script_alignment"):
+                parts.append(
+                    f"    • Alinhamento com roteiro: {v['script_alignment']}"
+                )
+
+    return "\n".join(parts)
+
+
+async def build_style_bible(
+    video_docs: list[dict],
+    api_key: str,
+) -> dict:
+    """Gera o style bible cruzando N vídeos via Claude Sonnet 4.5."""
+    from anthropic import AsyncAnthropic
+
+    videos_formatted = "\n\n".join(
+        _format_video_for_bible(doc, idx)
+        for idx, doc in enumerate(video_docs, 1)
+    )
+
+    prompt = f"""Você é um analista de vídeos curtos (Reels/Shorts) especialista em identificar padrões de edição, composição visual e ritmo. Vou te mostrar {len(video_docs)} vídeos de referência e sua tarefa é extrair a "receita" VISUAL E RÍTMICA que o creator usa de forma consistente.
+
+REGRAS CRÍTICAS:
+1. NÃO faça análise de estrutura de roteiro. O usuário escreve seus próprios roteiros e o conhecimento do negócio dele não está aqui. Foque em FORMA, não em conteúdo.
+2. Busque padrões CONTEXTUAIS, nunca métricas mecânicas. RUIM: "cortes a cada 4 segundos". BOM: "cortes secos entram imediatamente após uma afirmação forte".
+3. Seja CONCRETO e ACIONÁVEL. Cada padrão deve ser aplicável de forma consciente na edição de um novo vídeo.
+4. Se um padrão aparece em pelo menos 60% dos vídeos, inclua. Se aparece em menos, ignore — é ruído.
+5. Se uma categoria não tem padrões claros nesses vídeos, deixe o array `patterns` vazio. Não invente.
+
+Aqui estão os {len(video_docs)} vídeos com todos os dados extraídos (cortes, transcrição, áudio, análise visual frame-a-frame correlacionada com a fala):
+
+{videos_formatted}
+
+Analise o conjunto e retorne APENAS um objeto JSON válido (sem markdown, sem comentários antes ou depois, sem ```json) com este schema exato:
+
+{{
+  "overview": "Parágrafo curto (2-3 frases) caracterizando o estilo visual e rítmico geral desse pacote de vídeos.",
+  "cuts_and_rhythm": {{
+    "description": "Como os cortes se comportam em relação ao que está sendo dito (nunca em segundos absolutos).",
+    "patterns": [
+      "Padrão 1 observado consistentemente",
+      "Padrão 2"
+    ]
+  }},
+  "b_roll_patterns": {{
+    "description": "Como e quando b-rolls entram em relação ao roteiro.",
+    "patterns": ["..."]
+  }},
+  "audio_patterns": {{
+    "description": "Como música e efeitos sonoros são usados — onde entram SFX, se música é contínua ou pontual, quais tipos de SFX recorrem.",
+    "patterns": ["..."]
+  }},
+  "visual_composition": {{
+    "description": "Estilo visual predominante — tipos de plano, paleta de cores, iluminação, mood geral.",
+    "patterns": ["..."]
+  }},
+  "text_on_screen": {{
+    "description": "Como texto aparece na tela e se relaciona com a fala.",
+    "patterns": ["..."]
+  }},
+  "contextual_rules": [
+    "Regra acionável 1 no formato 'faça X quando Y acontecer'",
+    "Regra acionável 2",
+    "..."
+  ],
+  "summary": "Parágrafo final sintetizando os 3-5 insights mais úteis para replicar esse estilo de forma consciente em novos vídeos."
+}}"""
+
+    client = AsyncAnthropic(api_key=api_key)
+    message = await client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=8192,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    text = message.content[0].text.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        if lines[-1].strip().startswith("```"):
+            lines = lines[1:-1]
+        else:
+            lines = lines[1:]
+        text = "\n".join(lines).strip()
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        return {
+            "error": "Falha ao parsear JSON da resposta",
+            "detail": str(e),
+            "raw_response": text[:5000],
+        }
+
+
+@app.post("/api/style-bibles")
+async def create_style_bible(payload: dict = Body(...)):
+    """Gera um style bible cruzando N vídeos selecionados."""
+    if db is None:
+        raise HTTPException(503, "MongoDB não configurado")
+
+    name = (payload.get("name") or "").strip()
+    video_ids = payload.get("video_ids") or []
+
+    if not name:
+        raise HTTPException(400, "Nome obrigatório")
+    if len(video_ids) < 2:
+        raise HTTPException(400, "Selecione pelo menos 2 vídeos")
+
+    try:
+        oids = [ObjectId(vid) for vid in video_ids]
+    except Exception:
+        raise HTTPException(400, "ID(s) inválido(s)")
+
+    video_docs = []
+    async for doc in db.videos.find({"_id": {"$in": oids}}):
+        video_docs.append(doc)
+
+    if len(video_docs) != len(video_ids):
+        raise HTTPException(
+            404, f"Apenas {len(video_docs)} de {len(video_ids)} vídeos encontrados"
+        )
+
+    missing = [
+        doc.get("filename", "?")
+        for doc in video_docs
+        if not doc.get("visual_descriptions")
+        or (
+            isinstance(doc.get("visual_descriptions"), list)
+            and len(doc["visual_descriptions"]) > 0
+            and doc["visual_descriptions"][0].get("error")
+        )
+    ]
+    if missing:
+        raise HTTPException(
+            400,
+            "Os seguintes vídeos não têm descrições visuais válidas: "
+            + ", ".join(missing)
+            + ". Gere as descrições visuais antes de criar o bible.",
+        )
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(500, "ANTHROPIC_API_KEY não configurada")
+
+    try:
+        bible_content = await build_style_bible(video_docs, api_key)
+    except Exception as e:
+        raise HTTPException(500, f"Erro ao gerar bible: {str(e)}")
+
+    bible_doc = {
+        "name": name,
+        "created_at": datetime.utcnow(),
+        "source_video_ids": oids,
+        "source_count": len(video_docs),
+        "source_filenames": [d.get("filename") for d in video_docs],
+        "content": bible_content,
+    }
+
+    result = await db.style_bibles.insert_one(bible_doc)
+    bible_doc["_id"] = str(result.inserted_id)
+    bible_doc["source_video_ids"] = [str(oid) for oid in oids]
+    _serialize_doc(bible_doc)
+
+    return bible_doc
+
+
+@app.get("/api/style-bibles")
+async def list_style_bibles():
+    """Lista todas os style bibles gerados."""
+    if db is None:
+        raise HTTPException(503, "MongoDB não configurado")
+
+    cursor = db.style_bibles.find(
+        {},
+        {
+            "name": 1,
+            "created_at": 1,
+            "source_count": 1,
+            "source_filenames": 1,
+        },
+    ).sort("created_at", -1)
+
+    items = []
+    async for doc in cursor:
+        items.append(_serialize_doc(doc))
+    return {"items": items, "count": len(items)}
+
+
+@app.get("/api/style-bibles/{bible_id}")
+async def get_style_bible(bible_id: str):
+    """Retorna um style bible completo."""
+    if db is None:
+        raise HTTPException(503, "MongoDB não configurado")
+
+    try:
+        oid = ObjectId(bible_id)
+    except Exception:
+        raise HTTPException(400, "ID inválido")
+
+    doc = await db.style_bibles.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(404, "Não encontrado")
+
+    doc["source_video_ids"] = [
+        str(vid) for vid in doc.get("source_video_ids", [])
+    ]
+    return _serialize_doc(doc)
+
+
+@app.delete("/api/style-bibles/{bible_id}")
+async def delete_style_bible(bible_id: str):
+    """Remove um style bible."""
+    if db is None:
+        raise HTTPException(503, "MongoDB não configurado")
+
+    try:
+        oid = ObjectId(bible_id)
+    except Exception:
+        raise HTTPException(400, "ID inválido")
+
+    result = await db.style_bibles.delete_one({"_id": oid})
+    if result.deleted_count == 0:
+        raise HTTPException(404, "Não encontrado")
+    return {"deleted": True}
+
+
 @app.delete("/api/library/{item_id}")
 async def delete_library_item(item_id: str):
     """Remove item da biblioteca e limpa arquivos associados."""
