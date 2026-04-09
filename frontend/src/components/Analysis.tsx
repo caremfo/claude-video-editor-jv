@@ -1,5 +1,6 @@
 import { useState } from "react";
-import type { AnalysisResult } from "../App";
+import { toast } from "sonner";
+import type { AnalysisResult, VisualDescription } from "../App";
 import {
   Clock,
   Scissors,
@@ -10,6 +11,9 @@ import {
   ChevronRight,
   Music,
   Volume2,
+  Eye,
+  Sparkles,
+  Loader2,
 } from "lucide-react";
 
 type Props = {
@@ -20,6 +24,35 @@ type Props = {
 export function Analysis({ result, apiBase }: Props) {
   const { metadata, transcription, scenes, frames, stats, audio_events } = result;
   const [currentFrame, setCurrentFrame] = useState(0);
+  const [descriptions, setDescriptions] = useState<VisualDescription[] | null>(
+    result.visual_descriptions || null
+  );
+  const [describing, setDescribing] = useState(false);
+
+  const generateDescriptions = async () => {
+    if (!result._id) {
+      toast.error("Este vídeo precisa estar salvo na biblioteca para gerar descrições");
+      return;
+    }
+    setDescribing(true);
+    try {
+      const res = await fetch(
+        `${apiBase}/api/library/${result._id}/describe-visuals`,
+        { method: "POST" }
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: "Erro" }));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      setDescriptions(data.descriptions);
+      toast.success(`${data.count} cenas descritas`);
+    } catch (err: any) {
+      toast.error(`Erro: ${err.message}`);
+    } finally {
+      setDescribing(false);
+    }
+  };
 
   const frameSrc = (name: string) =>
     `${apiBase}/api/frames/${result.job_id}/${name}`;
@@ -168,6 +201,145 @@ export function Analysis({ result, apiBase }: Props) {
           </div>
         </div>
       )}
+
+      {/* Visual Descriptions */}
+      <div className="bg-care-surface border border-care-border rounded-2xl p-6">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-semibold text-care-light flex items-center gap-2">
+            <Eye className="w-5 h-5 text-care-accent" />
+            Descrição visual por cena
+          </h3>
+          {!descriptions && (
+            <button
+              onClick={generateDescriptions}
+              disabled={describing || !result._id}
+              className="flex items-center gap-2 text-sm bg-care-accent hover:bg-care-accent-hover text-white px-4 py-2 rounded-lg disabled:opacity-40 transition"
+            >
+              {describing ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Analisando cenas...
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-4 h-4" />
+                  Gerar descrições (Claude)
+                </>
+              )}
+            </button>
+          )}
+          {descriptions && (
+            <button
+              onClick={generateDescriptions}
+              disabled={describing}
+              className="text-xs text-care-muted hover:text-care-light"
+            >
+              {describing ? "Regenerando..." : "Regenerar"}
+            </button>
+          )}
+        </div>
+
+        {!descriptions && !describing && (
+          <p className="text-care-muted text-sm">
+            Clique em "Gerar descrições" para o Claude analisar cada cena e
+            identificar: tipo de plano, o que aparece, elementos na tela,
+            composição e como isso serve o roteiro.
+            {!result._id && (
+              <span className="text-amber-400 block mt-2">
+                ⚠️ Este vídeo ainda não está salvo na biblioteca.
+              </span>
+            )}
+          </p>
+        )}
+
+        {describing && !descriptions && (
+          <div className="flex items-center gap-3 text-care-muted text-sm">
+            <Loader2 className="w-4 h-4 animate-spin text-care-accent" />
+            Claude está olhando cada frame e correlacionando com a transcrição... (pode levar até 30s)
+          </div>
+        )}
+
+        {descriptions && descriptions.length > 0 && (
+          <div className="space-y-4">
+            {descriptions.map((d, i) => {
+              if (d.error) {
+                return (
+                  <div
+                    key={i}
+                    className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 text-sm"
+                  >
+                    <p className="text-red-400 font-medium">Erro: {d.error}</p>
+                    {d.raw_response && (
+                      <pre className="text-care-muted text-xs mt-2 overflow-x-auto whitespace-pre-wrap">
+                        {d.raw_response}
+                      </pre>
+                    )}
+                  </div>
+                );
+              }
+              return (
+                <div
+                  key={i}
+                  className="bg-care-dark border border-care-border rounded-xl p-4"
+                >
+                  <div className="flex items-center gap-2 mb-3">
+                    <span className="bg-care-accent/20 text-care-accent text-xs font-mono px-2 py-0.5 rounded">
+                      Cena {d.scene}
+                    </span>
+                    {d.shot_type && (
+                      <span className="text-care-muted text-xs bg-care-surface px-2 py-0.5 rounded">
+                        {d.shot_type}
+                      </span>
+                    )}
+                    {d.subject_type && (
+                      <span className="text-care-muted text-xs bg-care-surface px-2 py-0.5 rounded">
+                        {d.subject_type}
+                      </span>
+                    )}
+                    {d.purpose && (
+                      <span className="text-care-accent text-xs bg-care-accent/10 px-2 py-0.5 rounded">
+                        {d.purpose}
+                      </span>
+                    )}
+                  </div>
+
+                  {d.subject && (
+                    <p className="text-care-light text-sm mb-2">
+                      <span className="text-care-muted text-xs block mb-0.5">O que aparece</span>
+                      {d.subject}
+                    </p>
+                  )}
+
+                  {d.visual_elements && d.visual_elements.length > 0 && (
+                    <div className="mb-2">
+                      <span className="text-care-muted text-xs block mb-1">Elementos na tela</span>
+                      <ul className="text-care-light text-sm list-disc list-inside space-y-0.5">
+                        {d.visual_elements.map((el, j) => (
+                          <li key={j}>{el}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {d.composition && (
+                    <p className="text-care-light text-sm mb-2">
+                      <span className="text-care-muted text-xs block mb-0.5">Composição</span>
+                      {d.composition}
+                    </p>
+                  )}
+
+                  {d.script_alignment && (
+                    <p className="text-care-light text-sm border-l-2 border-care-accent/40 pl-3 mt-3">
+                      <span className="text-care-muted text-xs block mb-0.5">Como serve o roteiro</span>
+                      {d.script_alignment}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
 
       {/* Transcription */}
       {transcription && !transcription.error && (

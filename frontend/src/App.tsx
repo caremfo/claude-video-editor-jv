@@ -41,6 +41,21 @@ export type AnalysisResult = {
     sound_effects_count: number;
     has_music: boolean;
   };
+  visual_descriptions?: VisualDescription[] | null;
+  _id?: string;
+};
+
+export type VisualDescription = {
+  scene: number;
+  shot_type?: string;
+  subject_type?: string;
+  subject?: string;
+  visual_elements?: string[];
+  composition?: string;
+  script_alignment?: string;
+  purpose?: string;
+  error?: string;
+  raw_response?: string;
 };
 
 type QueueItem = {

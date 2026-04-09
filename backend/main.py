@@ -49,11 +49,14 @@ async def shutdown_db():
 
 
 def _serialize_doc(doc: dict) -> dict:
-    """Convert BSON ObjectId to string for JSON response."""
-    if doc and "_id" in doc:
+    """Convert BSON ObjectId and datetimes to JSON-safe values recursively."""
+    if not doc:
+        return doc
+    if "_id" in doc:
         doc["_id"] = str(doc["_id"])
-    if doc and "uploaded_at" in doc and isinstance(doc["uploaded_at"], datetime):
-        doc["uploaded_at"] = doc["uploaded_at"].isoformat()
+    for key, value in list(doc.items()):
+        if isinstance(value, datetime):
+            doc[key] = value.isoformat()
     return doc
 
 
@@ -518,6 +521,197 @@ async def update_library_item(item_id: str, updates: dict = Body(...)):
         raise HTTPException(404, "Não encontrado")
 
     return {"updated": True, "fields": list(filtered.keys())}
+
+
+# ─── Visual frame description (Claude Vision) ────────────────────────
+
+def _select_representative_frames(
+    scenes: list[dict], frames: list[str], fps: int = 3
+) -> list[tuple[int, str]]:
+    """
+    Para cada cena, escolhe o frame do meio como representativo.
+    Se não há cenas, amostra 6 frames uniformemente.
+    Retorna lista de (scene_num, frame_filename).
+    """
+    total = len(frames)
+    if total == 0:
+        return []
+
+    if not scenes:
+        sample_count = min(6, total)
+        step = max(1, total // sample_count)
+        return [
+            (i + 1, frames[min(i * step, total - 1)])
+            for i in range(sample_count)
+        ]
+
+    result = []
+    for s in scenes:
+        middle_time = (s["start"] + s["end"]) / 2
+        # frames are extracted at `fps` fps, numbered starting at 1
+        frame_idx = min(int(middle_time * fps), total - 1)
+        result.append((s["scene"], frames[frame_idx]))
+    return result
+
+
+async def describe_frames_with_claude(
+    job_dir: Path,
+    scenes: list,
+    frames: list[str],
+    transcription: dict | None,
+    api_key: str,
+) -> list[dict]:
+    """Chama Claude Vision para descrever frames-chave em contexto."""
+    import base64
+    from anthropic import AsyncAnthropic
+
+    representatives = _select_representative_frames(scenes, frames, fps=3)
+    if not representatives:
+        return []
+
+    # Build transcript text
+    transcript_text = ""
+    if transcription and transcription.get("segments"):
+        transcript_text = "\n".join(
+            f"[{s['start']:.1f}s - {s['end']:.1f}s] {s['text']}"
+            for s in transcription["segments"]
+        )
+    else:
+        transcript_text = "Sem transcrição disponível."
+
+    # Build content blocks
+    content_blocks: list[dict] = [
+        {
+            "type": "text",
+            "text": (
+                "Você é um analista de vídeos curtos (Reels/Shorts) especialista em identificar "
+                "padrões de edição e composição visual que fazem conteúdo performar.\n\n"
+                "Vou te enviar frames representativos de um vídeo, um por cena (o frame do meio de "
+                "cada cena detectada). Junto com cada imagem, você tem a transcrição completa do "
+                "áudio com timestamps, para você correlacionar o visual com o que está sendo dito.\n\n"
+                "Sua tarefa: para cada frame, descrever de forma específica e concreta o que está "
+                "sendo mostrado e POR QUE faz sentido naquele ponto do roteiro. Evite descrições "
+                "genéricas — seja direto sobre os elementos visuais concretos.\n\n"
+                f"Transcrição completa:\n{transcript_text}\n\n"
+                "Retorne APENAS um array JSON válido (sem markdown, sem comentários, sem texto "
+                "antes ou depois), com um objeto por frame, nesta estrutura exata:\n\n"
+                "[\n"
+                "  {\n"
+                '    "scene": 1,\n'
+                '    "shot_type": "close-up | medium | wide | extreme-wide",\n'
+                '    "subject_type": "talking_head | b_roll | text_card | graphic | mixed",\n'
+                '    "subject": "descrição específica do que aparece (pessoa, objeto, cena, gráfico)",\n'
+                '    "visual_elements": ["texto na tela: \'FRASE EXATA\'", "seta amarela apontando", "logo no canto"],\n'
+                '    "composition": "enquadramento, iluminação, paleta de cores, mood geral",\n'
+                '    "script_alignment": "como este visual reforça ou ilustra o que está sendo dito neste momento",\n'
+                '    "purpose": "hook | explanation | example | emphasis | b_roll_illustrative | cta | transition"\n'
+                "  }\n"
+                "]"
+            ),
+        }
+    ]
+
+    for scene_num, frame_file in representatives:
+        frame_path = job_dir / "frames" / frame_file
+        if not frame_path.exists():
+            continue
+        with open(frame_path, "rb") as f:
+            img_b64 = base64.b64encode(f.read()).decode()
+
+        content_blocks.append({
+            "type": "text",
+            "text": f"\n=== Cena {scene_num} ===",
+        })
+        content_blocks.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": img_b64,
+            },
+        })
+
+    client = AsyncAnthropic(api_key=api_key)
+    message = await client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=4096,
+        messages=[{"role": "user", "content": content_blocks}],
+    )
+
+    text = message.content[0].text.strip()
+    # Strip markdown fences if Claude added them
+    if text.startswith("```"):
+        lines = text.split("\n")
+        if lines[-1].strip().startswith("```"):
+            lines = lines[1:-1]
+        else:
+            lines = lines[1:]
+        text = "\n".join(lines).strip()
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        return [
+            {
+                "error": "Falha ao parsear JSON da resposta",
+                "detail": str(e),
+                "raw_response": text[:2000],
+            }
+        ]
+
+
+@app.post("/api/library/{item_id}/describe-visuals")
+async def describe_visuals(item_id: str):
+    """Gera descrições visuais via Claude Vision e salva no documento."""
+    if db is None:
+        raise HTTPException(503, "MongoDB não configurado")
+
+    try:
+        oid = ObjectId(item_id)
+    except Exception:
+        raise HTTPException(400, "ID inválido")
+
+    doc = await db.videos.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(404, "Não encontrado")
+
+    job_dir = UPLOAD_DIR / doc["job_id"]
+    if not job_dir.exists() or not (job_dir / "frames").exists():
+        raise HTTPException(
+            410,
+            "Frames não estão mais disponíveis no container. "
+            "Re-faça upload do vídeo para gerar descrições visuais.",
+        )
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(500, "ANTHROPIC_API_KEY não configurada")
+
+    try:
+        descriptions = await describe_frames_with_claude(
+            job_dir=job_dir,
+            scenes=doc.get("scenes", []),
+            frames=doc.get("frames", []),
+            transcription=doc.get("transcription"),
+            api_key=api_key,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Erro ao chamar Claude: {str(e)}")
+
+    await db.videos.update_one(
+        {"_id": oid},
+        {
+            "$set": {
+                "visual_descriptions": descriptions,
+                "visual_described_at": datetime.utcnow(),
+            }
+        },
+    )
+
+    return {
+        "descriptions": descriptions,
+        "count": len(descriptions),
+    }
 
 
 @app.delete("/api/library/{item_id}")
