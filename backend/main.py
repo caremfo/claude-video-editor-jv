@@ -190,98 +190,61 @@ def health():
 
 @app.post("/api/analyze")
 async def analyze_video(
-    filename: str = Form(...),
-    metadata: str = Form(...),
-    scenes: str = Form(...),
-    frames: list[UploadFile] = File(...),
-    audio: UploadFile | None = File(None),
+    video: UploadFile = File(...),
+    fps: int = Form(3),
 ):
     """
-    Recebe dados pré-processados pelo client (ffmpeg.wasm + canvas diff).
-    O backend só persiste e chama o Whisper para transcrever.
+    Recebe um vídeo, extrai frames e áudio, transcreve via Whisper,
+    detecta cortes de cena e persiste no Mongo.
 
-    Form fields:
-    - filename: nome original do arquivo
-    - metadata: JSON serializado com {duration_seconds, width, height, fps, ...}
-    - scenes: JSON serializado com a lista de cenas detectadas no client
-    - frames: lista de JPEGs (multipart)
-    - audio: MP3 extraído do vídeo (opcional)
+    Sem PANNs (audio events) — a detecção de música/SFX foi removida
+    porque consome ~1 GB de RAM e estourava o B1.
     """
+    if video.size and video.size > MAX_FILE_SIZE:
+        raise HTTPException(413, "Arquivo muito grande (max 100MB)")
+
     job_id = str(uuid.uuid4())[:8]
     job_dir = UPLOAD_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
-    (job_dir / "frames").mkdir(parents=True, exist_ok=True)
+
+    video_path = str(job_dir / video.filename)
+    with open(video_path, "wb") as f:
+        content = await video.read()
+        f.write(content)
 
     try:
-        metadata_obj = json.loads(metadata)
-        scenes_obj = json.loads(scenes)
-    except json.JSONDecodeError as e:
-        shutil.rmtree(job_dir, ignore_errors=True)
-        raise HTTPException(400, f"JSON inválido: {e}")
+        # 1. Metadata
+        metadata = get_video_metadata(video_path)
 
-    try:
-        # Save frames to disk
-        frame_names: list[str] = []
-        for i, frame in enumerate(frames):
-            name = frame.filename or f"frame_{i + 1:04d}.jpg"
-            with open(job_dir / "frames" / name, "wb") as f:
-                f.write(await frame.read())
-            frame_names.append(name)
+        # 2. Extract frames
+        frame_names = extract_frames(video_path, str(job_dir), fps=fps)
 
-        # Save audio if present
-        audio_path = None
-        if audio is not None:
-            audio_path = job_dir / "audio.mp3"
-            with open(audio_path, "wb") as f:
-                f.write(await audio.read())
-
-        # Transcribe via Whisper API
+        # 3. Transcribe via Whisper API
         transcription = None
         openai_key = os.environ.get("OPENAI_API_KEY", "")
-        if audio_path and openai_key:
+        if metadata.get("has_audio") and openai_key:
             try:
-                from openai import OpenAI
-
-                client = OpenAI(api_key=openai_key)
-                with open(audio_path, "rb") as f:
-                    transcript = client.audio.transcriptions.create(
-                        model="whisper-1",
-                        file=f,
-                        response_format="verbose_json",
-                        timestamp_granularities=["segment"],
-                        language="pt",
-                    )
-                transcription = {
-                    "text": transcript.text,
-                    "language": transcript.language,
-                    "segments": [
-                        {
-                            "start": round(s.start, 2),
-                            "end": round(s.end, 2),
-                            "text": s.text.strip(),
-                        }
-                        for s in (transcript.segments or [])
-                    ],
-                }
+                transcription = transcribe_audio(video_path, str(job_dir), openai_key)
             except Exception as e:
                 transcription = {"error": str(e)}
 
+        # 4. Scene detection
+        scenes = detect_scenes(video_path)
+
         # Build result
-        duration = metadata_obj.get("duration_seconds", 0) or 0
-        cuts_per_min = (
-            (len(scenes_obj) / (duration / 60)) if duration > 0 and scenes_obj else 0
-        )
+        duration = metadata["duration_seconds"]
+        cuts_per_min = (len(scenes) / (duration / 60)) if duration > 0 and scenes else 0
 
         result = {
             "job_id": job_id,
-            "metadata": metadata_obj,
+            "metadata": metadata,
             "transcription": transcription,
-            "scenes": scenes_obj,
+            "scenes": scenes,
             "frames": frame_names,
-            "audio_events": None,  # virá via YAMNet client-side (Estágio 3)
+            "audio_events": None,  # removido — consumia muita RAM
             "stats": {
                 "total_frames": len(frame_names),
-                "total_scenes": len(scenes_obj),
+                "total_scenes": len(scenes),
                 "cuts_per_minute": round(cuts_per_min, 1),
                 "sound_effects_count": 0,
                 "has_music": False,
@@ -295,7 +258,7 @@ async def analyze_video(
         if db is not None:
             doc = {
                 **result,
-                "filename": filename,
+                "filename": video.filename,
                 "uploaded_at": datetime.utcnow(),
                 "category": "reference",
                 "tags": [],
@@ -317,7 +280,7 @@ async def analyze_video(
 
     except Exception as e:
         shutil.rmtree(job_dir, ignore_errors=True)
-        raise HTTPException(500, f"Erro ao processar dados: {str(e)}")
+        raise HTTPException(500, f"Erro ao processar vídeo: {str(e)}")
 
 
 @app.get("/api/frames/{job_id}/{frame_name}")

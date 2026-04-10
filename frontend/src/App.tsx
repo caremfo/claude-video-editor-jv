@@ -10,10 +10,6 @@ import {
   Upload as UploadIcon,
   BookOpen,
 } from "lucide-react";
-import {
-  processVideoLocally,
-  uploadProcessedVideo,
-} from "./utils/videoProcessor";
 import "./index.css";
 
 export type AnalysisResult = {
@@ -94,31 +90,30 @@ function App() {
       setCurrentIndex(i);
       const fileName = items[i].file.name;
 
-      const updateStage = (stage: string) => {
-        setQueue((prev) =>
-          prev.map((q) =>
-            q.file === items[i].file
-              ? { ...q, status: "processing", stage }
-              : q
-          )
-        );
-      };
+      setQueue((prev) =>
+        prev.map((q) =>
+          q.file === items[i].file
+            ? { ...q, status: "processing", stage: "Enviando vídeo..." }
+            : q
+        )
+      );
 
-      updateStage("Iniciando...");
+      const formData = new FormData();
+      formData.append("video", items[i].file);
+      formData.append("fps", "3");
 
       try {
-        // Stage 1: process locally with ffmpeg.wasm
-        const processed = await processVideoLocally(items[i].file, updateStage);
+        const res = await fetch(`${API_BASE}/api/analyze`, {
+          method: "POST",
+          body: formData,
+        });
 
-        // Stage 2: upload processed data to backend
-        updateStage(
-          `Enviando ${processed.frames.length} frames + áudio...`
-        );
-        const data: AnalysisResult = await uploadProcessedVideo(
-          API_BASE,
-          items[i].file,
-          processed
-        );
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+          throw new Error(err.detail || `HTTP ${res.status}`);
+        }
+
+        const data: AnalysisResult = await res.json();
         data.fileName = fileName;
 
         setQueue((prev) =>
