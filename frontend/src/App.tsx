@@ -308,39 +308,45 @@ function App() {
                   key={i}
                   onClick={() => item.status === "done" && setSelectedResult(i)}
                   className={`
-                    flex items-center justify-between bg-care-surface border border-care-border rounded-xl px-4 py-3 transition
+                    bg-care-surface border border-care-border rounded-xl px-4 py-3 transition
                     ${item.status === "done" ? "cursor-pointer hover:border-care-accent" : ""}
                   `}
                 >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <StatusBadge status={item.status} />
-                    <span className="text-care-light text-sm truncate">
-                      {item.file.name}
-                    </span>
-                    <span className="text-care-muted text-xs">
-                      {(item.file.size / 1024 / 1024).toFixed(1)} MB
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {item.status === "processing" && item.stage && (
-                      <span className="text-care-accent text-xs">
-                        {item.stage}
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <StatusBadge status={item.status} />
+                      <span className="text-care-light text-sm truncate">
+                        {item.file.name}
                       </span>
-                    )}
-                    {item.result && (
                       <span className="text-care-muted text-xs">
-                        {item.result.metadata.duration_seconds}s &middot;{" "}
-                        {item.result.stats.total_scenes} cortes &middot;{" "}
-                        {item.result.stats.total_frames} frames
+                        {(item.file.size / 1024 / 1024).toFixed(1)} MB
                       </span>
-                    )}
-                    {item.error && (
-                      <span className="text-red-400 text-xs">{item.error}</span>
-                    )}
-                    {item.status === "done" && (
-                      <span className="text-care-accent text-xs">Ver &rarr;</span>
-                    )}
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      {item.status === "processing" && item.stage && (
+                        <span className="text-care-accent text-xs">
+                          {item.stage}
+                        </span>
+                      )}
+                      {item.result && (
+                        <span className="text-care-muted text-xs">
+                          {item.result.metadata.duration_seconds}s &middot;{" "}
+                          {item.result.stats.total_scenes} cortes &middot;{" "}
+                          {item.result.stats.total_frames} frames
+                        </span>
+                      )}
+                      {item.status === "done" && (
+                        <span className="text-care-accent text-xs">Ver &rarr;</span>
+                      )}
+                    </div>
                   </div>
+                  {item.error && (
+                    <div className="mt-3 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2">
+                      <p className="text-red-400 text-xs font-mono break-all whitespace-pre-wrap">
+                        {item.error}
+                      </p>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

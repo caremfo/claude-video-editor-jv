@@ -1,5 +1,5 @@
 import { FFmpeg } from "@ffmpeg/ffmpeg";
-import { fetchFile, toBlobURL } from "@ffmpeg/util";
+import { fetchFile } from "@ffmpeg/util";
 
 export type ProcessedFrame = {
   name: string;
@@ -26,29 +26,37 @@ export type ProcessedVideo = {
   }[];
 };
 
-const FFMPEG_VERSION = "0.12.10";
-const FFMPEG_BASE = `https://unpkg.com/@ffmpeg/core@${FFMPEG_VERSION}/dist/umd`;
+// Loaded from same origin (public/ffmpeg/) to avoid Safari/CORS issues
+// with cross-origin Worker importScripts.
+const FFMPEG_BASE = "/ffmpeg";
 const EXTRACT_FPS = 3;
 const SCENE_THRESHOLD = 0.32; // empirical — tune if too sensitive/insensitive
 
 let ffmpegInstance: FFmpeg | null = null;
 let ffmpegLoadingPromise: Promise<FFmpeg> | null = null;
 
-async function getFFmpeg(
-  onLog?: (msg: string) => void
-): Promise<FFmpeg> {
+async function getFFmpeg(): Promise<FFmpeg> {
   if (ffmpegInstance) return ffmpegInstance;
   if (ffmpegLoadingPromise) return ffmpegLoadingPromise;
 
   ffmpegLoadingPromise = (async () => {
     const ffmpeg = new FFmpeg();
-    if (onLog) {
-      ffmpeg.on("log", ({ message }) => onLog(message));
-    }
-    await ffmpeg.load({
-      coreURL: await toBlobURL(`${FFMPEG_BASE}/ffmpeg-core.js`, "text/javascript"),
-      wasmURL: await toBlobURL(`${FFMPEG_BASE}/ffmpeg-core.wasm`, "application/wasm"),
+    ffmpeg.on("log", ({ message }) => {
+      // Surface ffmpeg internal logs to console for debugging
+      console.log("[ffmpeg]", message);
     });
+    try {
+      const origin = window.location.origin;
+      await ffmpeg.load({
+        coreURL: `${origin}${FFMPEG_BASE}/ffmpeg-core.js`,
+        wasmURL: `${origin}${FFMPEG_BASE}/ffmpeg-core.wasm`,
+      });
+    } catch (e: any) {
+      ffmpegLoadingPromise = null;
+      throw new Error(
+        `Falha ao carregar ffmpeg.wasm: ${e?.message || e}`
+      );
+    }
     ffmpegInstance = ffmpeg;
     return ffmpeg;
   })();
@@ -157,10 +165,8 @@ function round(n: number, digits = 2): number {
   return Math.round(n * factor) / factor;
 }
 
-export async function preloadFFmpeg(
-  onLog?: (msg: string) => void
-): Promise<void> {
-  await getFFmpeg(onLog);
+export async function preloadFFmpeg(): Promise<void> {
+  await getFFmpeg();
 }
 
 export async function processVideoLocally(
@@ -171,20 +177,41 @@ export async function processVideoLocally(
   const ffmpeg = await getFFmpeg();
 
   onProgress?.("Lendo metadados do vídeo...");
-  const meta = await getVideoMetadata(file);
+  let meta;
+  try {
+    meta = await getVideoMetadata(file);
+  } catch (e: any) {
+    throw new Error(`Não consegui ler metadados: ${e?.message || e}`);
+  }
 
   onProgress?.("Carregando vídeo no ffmpeg...");
-  const inputName = "input." + (file.name.split(".").pop() || "mp4");
-  await ffmpeg.writeFile(inputName, await fetchFile(file));
+  const ext = (file.name.split(".").pop() || "mp4").toLowerCase();
+  const inputName = `input.${ext}`;
+  try {
+    await ffmpeg.writeFile(inputName, await fetchFile(file));
+  } catch (e: any) {
+    throw new Error(`Falha ao escrever arquivo no ffmpeg: ${e?.message || e}`);
+  }
 
   // Extract frames at EXTRACT_FPS
   onProgress?.("Extraindo frames...");
-  await ffmpeg.exec([
-    "-i", inputName,
-    "-vf", `fps=${EXTRACT_FPS}`,
-    "-q:v", "3",
-    "frame_%04d.jpg",
-  ]);
+  let exitCode;
+  try {
+    exitCode = await ffmpeg.exec([
+      "-i", inputName,
+      "-vf", `fps=${EXTRACT_FPS}`,
+      "-q:v", "3",
+      "frame_%04d.jpg",
+    ]);
+  } catch (e: any) {
+    throw new Error(`ffmpeg falhou na extração de frames: ${e?.message || e}`);
+  }
+  if (exitCode !== 0) {
+    throw new Error(
+      `ffmpeg saiu com código ${exitCode} na extração de frames. ` +
+        "Verifique se o vídeo é válido."
+    );
+  }
 
   // List and read frames
   const dirContents = (await ffmpeg.listDir("/")) as Array<{
