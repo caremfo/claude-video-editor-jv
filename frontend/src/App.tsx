@@ -10,6 +10,10 @@ import {
   Upload as UploadIcon,
   BookOpen,
 } from "lucide-react";
+import {
+  processVideoLocally,
+  uploadProcessedVideo,
+} from "./utils/videoProcessor";
 import "./index.css";
 
 export type AnalysisResult = {
@@ -67,6 +71,7 @@ export type VisualDescription = {
 type QueueItem = {
   file: File;
   status: "pending" | "processing" | "done" | "error";
+  stage?: string;
   result?: AnalysisResult;
   error?: string;
 };
@@ -87,41 +92,53 @@ function App() {
 
     for (let i = 0; i < items.length; i++) {
       setCurrentIndex(i);
-      setQueue((prev) =>
-        prev.map((q, idx) => (idx === i ? { ...q, status: "processing" } : q))
-      );
+      const fileName = items[i].file.name;
 
-      const formData = new FormData();
-      formData.append("video", items[i].file);
-      formData.append("fps", "3");
+      const updateStage = (stage: string) => {
+        setQueue((prev) =>
+          prev.map((q) =>
+            q.file === items[i].file
+              ? { ...q, status: "processing", stage }
+              : q
+          )
+        );
+      };
+
+      updateStage("Iniciando...");
 
       try {
-        const res = await fetch(`${API_BASE}/api/analyze`, {
-          method: "POST",
-          body: formData,
-        });
+        // Stage 1: process locally with ffmpeg.wasm
+        const processed = await processVideoLocally(items[i].file, updateStage);
 
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ detail: "Erro desconhecido" }));
-          throw new Error(err.detail || `HTTP ${res.status}`);
-        }
-
-        const data: AnalysisResult = await res.json();
-        data.fileName = items[i].file.name;
+        // Stage 2: upload processed data to backend
+        updateStage(
+          `Enviando ${processed.frames.length} frames + áudio...`
+        );
+        const data: AnalysisResult = await uploadProcessedVideo(
+          API_BASE,
+          items[i].file,
+          processed
+        );
+        data.fileName = fileName;
 
         setQueue((prev) =>
-          prev.map((q, idx) =>
-            idx === i ? { ...q, status: "done", result: data } : q
+          prev.map((q) =>
+            q.file === items[i].file
+              ? { ...q, status: "done", result: data, stage: undefined }
+              : q
           )
         );
-        toast.success(`${items[i].file.name} concluído!`);
+        toast.success(`${fileName} concluído!`);
       } catch (err: any) {
+        console.error(err);
         setQueue((prev) =>
-          prev.map((q, idx) =>
-            idx === i ? { ...q, status: "error", error: err.message } : q
+          prev.map((q) =>
+            q.file === items[i].file
+              ? { ...q, status: "error", error: err.message }
+              : q
           )
         );
-        toast.error(`${items[i].file.name}: ${err.message}`);
+        toast.error(`${fileName}: ${err.message}`);
       }
     }
 
@@ -259,14 +276,21 @@ function App() {
         {/* Processing indicator */}
         {view === "upload" && processing && (
           <div className="text-center py-8">
-            <div className="inline-flex items-center gap-3 bg-care-surface border border-care-border rounded-xl px-6 py-4">
-              <div className="w-5 h-5 border-2 border-care-accent border-t-transparent rounded-full animate-spin" />
-              <span className="text-care-light">
-                Processando {currentIndex + 1} de {queue.length}...
-              </span>
-              <span className="text-care-muted text-sm">
+            <div className="inline-flex flex-col items-center gap-2 bg-care-surface border border-care-border rounded-xl px-6 py-4 max-w-lg">
+              <div className="flex items-center gap-3">
+                <div className="w-5 h-5 border-2 border-care-accent border-t-transparent rounded-full animate-spin" />
+                <span className="text-care-light">
+                  Processando {currentIndex + 1} de {queue.length}
+                </span>
+              </div>
+              <span className="text-care-muted text-sm truncate max-w-full">
                 {queue[currentIndex]?.file.name}
               </span>
+              {queue[currentIndex]?.stage && (
+                <span className="text-care-accent text-xs">
+                  {queue[currentIndex]?.stage}
+                </span>
+              )}
             </div>
           </div>
         )}
@@ -298,6 +322,11 @@ function App() {
                     </span>
                   </div>
                   <div className="flex items-center gap-2">
+                    {item.status === "processing" && item.stage && (
+                      <span className="text-care-accent text-xs">
+                        {item.stage}
+                      </span>
+                    )}
                     {item.result && (
                       <span className="text-care-muted text-xs">
                         {item.result.metadata.duration_seconds}s &middot;{" "}

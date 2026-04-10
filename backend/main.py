@@ -158,137 +158,6 @@ def transcribe_audio(video_path: str, output_dir: str, openai_key: str) -> dict 
     }
 
 
-# ─── Audio event detection (PANNs) ────────────────────────────────────
-
-_sed_model = None
-
-
-def get_sed_model():
-    """Lazy-load the PANNs sound event detection model."""
-    global _sed_model
-    if _sed_model is None:
-        from panns_inference import SoundEventDetection
-        _sed_model = SoundEventDetection(checkpoint_path=None, device="cpu")
-    return _sed_model
-
-
-SPEECH_TERMS = [
-    "speech", "conversation", "narration", "monologue",
-    "male speech", "female speech", "child speech",
-]
-MUSIC_TERMS = [
-    "music", "soundtrack", "song", "singing", "instrument",
-    "guitar", "piano", "drum", "bass", "synthesizer",
-    "orchestra", "choir", "rapping",
-]
-
-
-def _is_speech_or_music(label: str) -> bool:
-    ll = label.lower()
-    return any(t in ll for t in SPEECH_TERMS + MUSIC_TERMS)
-
-
-def detect_audio_events(video_path: str, output_dir: str) -> dict | None:
-    """Detecta música e efeitos sonoros nomeados via PANNs (AudioSet 527 classes)."""
-    try:
-        import numpy as np
-        import librosa
-        from panns_inference import labels
-    except ImportError as e:
-        return {"error": f"panns-inference não disponível: {e}"}
-
-    wav_path = os.path.join(output_dir, "audio_32k.wav")
-    cmd = [
-        "ffmpeg", "-i", video_path, "-vn", "-ac", "1", "-ar", "32000",
-        "-acodec", "pcm_s16le", wav_path, "-y", "-loglevel", "warning",
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0 or not os.path.exists(wav_path):
-        return None
-
-    try:
-        audio, _ = librosa.load(wav_path, sr=32000, mono=True)
-    except Exception as e:
-        return {"error": f"falha ao carregar áudio: {e}"}
-
-    if len(audio) == 0:
-        return None
-
-    try:
-        sed = get_sed_model()
-        framewise = sed.inference(audio[None, :])[0]  # (time_steps, 527)
-    except Exception as e:
-        return {"error": f"inferência PANNs falhou: {e}"}
-
-    duration = len(audio) / 32000
-    if framewise.shape[0] == 0:
-        return None
-
-    time_per_step = duration / framewise.shape[0]
-    steps_per_second = max(1, int(round(1.0 / time_per_step)))
-
-    # Aggregate framewise predictions into 1-second windows
-    windows = []
-    num_windows = max(1, int(np.ceil(duration)))
-    for sec in range(num_windows):
-        start_step = sec * steps_per_second
-        end_step = min((sec + 1) * steps_per_second, framewise.shape[0])
-        if end_step <= start_step:
-            continue
-        window_avg = framewise[start_step:end_step].mean(axis=0)
-
-        top_idx = np.argsort(window_avg)[-5:][::-1]
-        events = [
-            {"label": labels[i], "score": round(float(window_avg[i]), 3)}
-            for i in top_idx
-            if window_avg[i] > 0.1
-        ]
-        windows.append({"start": sec, "events": events})
-
-    # Overall music presence
-    music_indices = [i for i, l in enumerate(labels) if "music" in l.lower()]
-    music_score = (
-        float(framewise[:, music_indices].mean()) if music_indices else 0.0
-    )
-
-    # Speech presence
-    speech_indices = [
-        i for i, l in enumerate(labels) if "speech" in l.lower() or l.lower() == "narration"
-    ]
-    speech_score = (
-        float(framewise[:, speech_indices].mean()) if speech_indices else 0.0
-    )
-
-    # Sound effects timeline (exclude speech/music)
-    sound_effects = []
-    seen = set()
-    for w in windows:
-        for e in w["events"]:
-            if e["score"] > 0.25 and not _is_speech_or_music(e["label"]):
-                key = (w["start"], e["label"])
-                if key not in seen:
-                    seen.add(key)
-                    sound_effects.append({
-                        "time": w["start"],
-                        "label": e["label"],
-                        "score": e["score"],
-                    })
-
-    # Cleanup temp wav
-    try:
-        os.remove(wav_path)
-    except Exception:
-        pass
-
-    return {
-        "has_music": music_score > 0.15,
-        "music_confidence": round(music_score, 3),
-        "speech_confidence": round(speech_score, 3),
-        "timeline": windows,
-        "sound_effects": sound_effects,
-    }
-
-
 def detect_scenes(video_path: str) -> list[dict]:
     try:
         from scenedetect import SceneManager, open_video
@@ -321,73 +190,104 @@ def health():
 
 @app.post("/api/analyze")
 async def analyze_video(
-    video: UploadFile = File(...),
-    openai_key: str = Form(""),
-    fps: int = Form(3),
+    filename: str = Form(...),
+    metadata: str = Form(...),
+    scenes: str = Form(...),
+    frames: list[UploadFile] = File(...),
+    audio: UploadFile | None = File(None),
 ):
-    # Usa env var como fallback
-    openai_key = openai_key or os.environ.get("OPENAI_API_KEY", "")
-    if video.size and video.size > MAX_FILE_SIZE:
-        raise HTTPException(413, "Arquivo muito grande (max 100MB)")
+    """
+    Recebe dados pré-processados pelo client (ffmpeg.wasm + canvas diff).
+    O backend só persiste e chama o Whisper para transcrever.
 
+    Form fields:
+    - filename: nome original do arquivo
+    - metadata: JSON serializado com {duration_seconds, width, height, fps, ...}
+    - scenes: JSON serializado com a lista de cenas detectadas no client
+    - frames: lista de JPEGs (multipart)
+    - audio: MP3 extraído do vídeo (opcional)
+    """
     job_id = str(uuid.uuid4())[:8]
     job_dir = UPLOAD_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
-
-    # Save uploaded file
-    video_path = str(job_dir / video.filename)
-    with open(video_path, "wb") as f:
-        content = await video.read()
-        f.write(content)
+    (job_dir / "frames").mkdir(parents=True, exist_ok=True)
 
     try:
-        # 1. Metadata
-        metadata = get_video_metadata(video_path)
+        metadata_obj = json.loads(metadata)
+        scenes_obj = json.loads(scenes)
+    except json.JSONDecodeError as e:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise HTTPException(400, f"JSON inválido: {e}")
 
-        # 2. Extract frames
-        frame_names = extract_frames(video_path, str(job_dir), fps=fps)
+    try:
+        # Save frames to disk
+        frame_names: list[str] = []
+        for i, frame in enumerate(frames):
+            name = frame.filename or f"frame_{i + 1:04d}.jpg"
+            with open(job_dir / "frames" / name, "wb") as f:
+                f.write(await frame.read())
+            frame_names.append(name)
 
-        # 3. Transcribe
+        # Save audio if present
+        audio_path = None
+        if audio is not None:
+            audio_path = job_dir / "audio.mp3"
+            with open(audio_path, "wb") as f:
+                f.write(await audio.read())
+
+        # Transcribe via Whisper API
         transcription = None
-        if metadata.get("has_audio") and openai_key:
+        openai_key = os.environ.get("OPENAI_API_KEY", "")
+        if audio_path and openai_key:
             try:
-                transcription = transcribe_audio(video_path, str(job_dir), openai_key)
+                from openai import OpenAI
+
+                client = OpenAI(api_key=openai_key)
+                with open(audio_path, "rb") as f:
+                    transcript = client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=f,
+                        response_format="verbose_json",
+                        timestamp_granularities=["segment"],
+                        language="pt",
+                    )
+                transcription = {
+                    "text": transcript.text,
+                    "language": transcript.language,
+                    "segments": [
+                        {
+                            "start": round(s.start, 2),
+                            "end": round(s.end, 2),
+                            "text": s.text.strip(),
+                        }
+                        for s in (transcript.segments or [])
+                    ],
+                }
             except Exception as e:
                 transcription = {"error": str(e)}
 
-        # 4. Scene detection
-        scenes = detect_scenes(video_path)
-
-        # 5. Audio event detection (music + named SFX)
-        audio_events = None
-        if metadata.get("has_audio"):
-            try:
-                audio_events = detect_audio_events(video_path, str(job_dir))
-            except Exception as e:
-                audio_events = {"error": str(e)}
-
-        # Build analysis
-        duration = metadata["duration_seconds"]
-        cuts_per_min = (len(scenes) / (duration / 60)) if duration > 0 and scenes else 0
-        sfx_count = len(audio_events.get("sound_effects", [])) if audio_events and "error" not in audio_events else 0
+        # Build result
+        duration = metadata_obj.get("duration_seconds", 0) or 0
+        cuts_per_min = (
+            (len(scenes_obj) / (duration / 60)) if duration > 0 and scenes_obj else 0
+        )
 
         result = {
             "job_id": job_id,
-            "metadata": metadata,
+            "metadata": metadata_obj,
             "transcription": transcription,
-            "scenes": scenes,
+            "scenes": scenes_obj,
             "frames": frame_names,
-            "audio_events": audio_events,
+            "audio_events": None,  # virá via YAMNet client-side (Estágio 3)
             "stats": {
                 "total_frames": len(frame_names),
-                "total_scenes": len(scenes),
+                "total_scenes": len(scenes_obj),
                 "cuts_per_minute": round(cuts_per_min, 1),
-                "sound_effects_count": sfx_count,
-                "has_music": bool(audio_events and audio_events.get("has_music")),
+                "sound_effects_count": 0,
+                "has_music": False,
             },
         }
 
-        # Save result to filesystem (for frame serving)
         with open(job_dir / "result.json", "w") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
 
@@ -395,7 +295,7 @@ async def analyze_video(
         if db is not None:
             doc = {
                 **result,
-                "filename": video.filename,
+                "filename": filename,
                 "uploaded_at": datetime.utcnow(),
                 "category": "reference",
                 "tags": [],
@@ -417,7 +317,7 @@ async def analyze_video(
 
     except Exception as e:
         shutil.rmtree(job_dir, ignore_errors=True)
-        raise HTTPException(500, f"Erro ao processar vídeo: {str(e)}")
+        raise HTTPException(500, f"Erro ao processar dados: {str(e)}")
 
 
 @app.get("/api/frames/{job_id}/{frame_name}")
